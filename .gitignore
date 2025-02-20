@@ -26,7 +26,7 @@ wheels/
 venv/
 env/
 ENV/
-.env
+# .env
 
 # Unit test / coverage reports
 htmlcov/
@@ -50,9 +50,9 @@ coverage.xml
 *.swo
 .DS_Store
 
-# Firebase credentials
-firebase-credentials.json
-*-firebase-adminsdk-*.json
+# # Firebase credentials
+# firebase-credentials.json
+# *-firebase-adminsdk-*.json
 
 # Logs
 *.log
