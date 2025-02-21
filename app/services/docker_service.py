@@ -120,20 +120,45 @@ if __name__ == "__main__":
     
     ssh_client.exec_command("chmod +x ~/aphrodite-deploy/run_aphrodite.py")
     logger.info("Deployment files created successfully")
-
+    
 async def setup_container(ssh_client, model_id: str, user_id: str, 
                         host_port: int = 2242, huggingface_token: Optional[str] = None):
     await setup_deployment_files(ssh_client, host_port)
     
     logger.info(f"Launching container for model {model_id}...")
+    
+    # Sanitize model_id for Docker naming conventions
+    # This keeps the original model_id for container environment
+    # but creates a safe name for Docker container/image naming
+    original_model_id = model_id
     safe_model_id = model_id.lower().replace("/", "-")
     
     env_vars = {
-        "MODEL_ID": model_id,
+        "MODEL_ID": original_model_id,  # Keep original model ID for the container environment
         "HOST_PORT": str(host_port),
         "USER_ID": user_id,
         "HUGGINGFACE_TOKEN": huggingface_token or ""
     }
+    
+    # Modify docker-compose.yml to use lowercase model ID for image naming
+    stdin, stdout, stderr = ssh_client.exec_command(
+        f"sed -i 's/aphrodite-engine-${{MODEL_ID:-gpt2}}/aphrodite-engine-{safe_model_id}/g' ~/aphrodite-deploy/docker-compose.yml"
+    )
+    exit_status = stdout.channel.recv_exit_status()
+    if exit_status != 0:
+        error_msg = f"Error updating docker-compose.yml: {stderr.read().decode('utf-8')}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
+    
+    # Update container name to use lowercase model ID
+    stdin, stdout, stderr = ssh_client.exec_command(
+        f"sed -i 's/container_name: aphrodite-${{MODEL_ID:-gpt2}}-${{USER_ID}}/container_name: aphrodite-{safe_model_id}-${{USER_ID}}/g' ~/aphrodite-deploy/docker-compose.yml"
+    )
+    exit_status = stdout.channel.recv_exit_status()
+    if exit_status != 0:
+        error_msg = f"Error updating container name in docker-compose.yml: {stderr.read().decode('utf-8')}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
     
     env_string = " ".join([f"{k}={v}" for k, v in env_vars.items()])
     launch_command = f"cd ~/aphrodite-deploy && {env_string} docker-compose up -d --build"
@@ -159,6 +184,45 @@ async def setup_container(ssh_client, model_id: str, user_id: str,
     
     logger.info(f"Container ID: {container_id}")
     return container_id
+
+# async def setup_container(ssh_client, model_id: str, user_id: str, 
+#                         host_port: int = 2242, huggingface_token: Optional[str] = None):
+#     await setup_deployment_files(ssh_client, host_port)
+    
+#     logger.info(f"Launching container for model {model_id}...")
+#     safe_model_id = model_id.lower().replace("/", "-")
+    
+#     env_vars = {
+#         "MODEL_ID": model_id,
+#         "HOST_PORT": str(host_port),
+#         "USER_ID": user_id,
+#         "HUGGINGFACE_TOKEN": huggingface_token or ""
+#     }
+    
+#     env_string = " ".join([f"{k}={v}" for k, v in env_vars.items()])
+#     launch_command = f"cd ~/aphrodite-deploy && {env_string} docker-compose up -d --build"
+    
+#     stdin, stdout, stderr = ssh_client.exec_command(launch_command)
+#     exit_status = stdout.channel.recv_exit_status()
+#     stderr_output = stderr.read().decode('utf-8')
+    
+#     if exit_status != 0 or "Error" in stderr_output:
+#         error_msg = f"Error launching container: {stderr_output}"
+#         logger.error(error_msg)
+#         raise Exception(error_msg)
+    
+#     stdin, stdout, stderr = ssh_client.exec_command(
+#         f"docker ps --filter name=aphrodite-{safe_model_id} --format '{{{{.ID}}}}'"
+#     )
+#     container_id = stdout.read().decode('utf-8').strip()
+    
+#     if not container_id:
+#         error_msg = "Failed to get container ID"
+#         logger.error(error_msg)
+#         raise Exception(error_msg)
+    
+#     logger.info(f"Container ID: {container_id}")
+#     return container_id
 
 async def monitor_container_startup(ssh_client, container_id: str, host_port: int = 2242, timeout: int = 600):
     """
