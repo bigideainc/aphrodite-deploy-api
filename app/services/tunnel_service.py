@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 
 logger = logging.getLogger("tunnel-service")
@@ -31,76 +32,77 @@ async def verify_localtunnel_installation(ssh_client, password=None):
             logger.error("Failed to install localtunnel")
             return False
         await asyncio.sleep(2)
-        
-        # Verify installation
-        stdin, stdout, stderr = ssh_client.exec_command("which lt")
-        if stdout.channel.recv_exit_status() != 0:
-            logger.error("Localtunnel installation verification failed")
-            return False
     
     return True
 
-async def setup_tunnel(ssh_client, host_port: int, subdomain: str, password=None):
-    """Set up localtunnel with better error handling and fallback options"""
+async def setup_tunnel(ssh_client, host_port: int, subdomain: str, password=None, deployment_id: str = None):
+    """Set up localtunnel with deployment-specific management"""
     logger.info(f"Setting up tunnel with subdomain: {subdomain}...")
+    
+    if not deployment_id:
+        deployment_id = subdomain.split('-')[-1]  # Fallback to extract from subdomain
+    
+    # Create deployment-specific directory
+    tunnel_dir = f"~/tunnel-{deployment_id}"
+    ssh_client.exec_command(f"mkdir -p {tunnel_dir}")
     
     # Verify and fix lt installation
     lt_installed = await verify_localtunnel_installation(ssh_client, password)
     if not lt_installed:
-        # Fallback to direct IP address if tunnel can't be set up
-        stdin, stdout, stderr = ssh_client.exec_command("curl -s ifconfig.me || curl -s icanhazip.com || hostname -I | awk '{print $1}'")
-        public_ip = stdout.read().decode('utf-8').strip()
-        if public_ip:
-            logger.info(f"Using direct IP address as fallback: {public_ip}")
-            return f"http://{public_ip}:{host_port}"
-        else:
-            logger.error("Failed to get public IP address")
-            return None
+        logger.error("Failed to verify localtunnel installation")
+        return None
     
-    # Kill any existing localtunnel processes
-    ssh_client.exec_command("pkill -f 'lt --port' || true")
+    # Kill any existing tunnel for this specific port
+    ssh_client.exec_command(f"pkill -f 'lt --port {host_port}' || true")
     
-    # Try with subdomain
-    tunnel_command = f"nohup lt --port {host_port} --subdomain {subdomain} > ~/tunnel.log 2>&1 &"
-    ssh_client.exec_command(tunnel_command)
+    # Start tunnel with deployment-specific logging
+    tunnel_log = f"{tunnel_dir}/tunnel.log"
+    tunnel_pid = f"{tunnel_dir}/tunnel.pid"
+    tunnel_command = f"""
+    cd {tunnel_dir} && 
+    lt --port {host_port} --subdomain {subdomain} > {tunnel_log} 2>&1 & 
+    echo $! > {tunnel_pid}
+    """
     
-    # Give localtunnel time to start
-    await asyncio.sleep(8)
+    stdin, stdout, stderr = ssh_client.exec_command(tunnel_command)
+    if stdout.channel.recv_exit_status() != 0:
+        logger.error("Failed to start tunnel process")
+        return None
     
-    # Check if tunnel was created successfully
-    stdin, stdout, stderr = ssh_client.exec_command("cat ~/tunnel.log")
-    log_content = stdout.read().decode('utf-8')
-    
-    url_match = re.search(r'your url is: (https://[^\s]+)', log_content)
-    if url_match:
-        tunnel_url = url_match.group(1)
-        logger.info(f"Tunnel URL: {tunnel_url}")
-        return tunnel_url
-    
-    # If subdomain fails, try without specifying subdomain
-    logger.warning("Failed to create tunnel with specified subdomain, trying without subdomain...")
-    ssh_client.exec_command("pkill -f 'lt --port' || true")
-    tunnel_command = f"nohup lt --port {host_port} > ~/tunnel2.log 2>&1 &"
-    ssh_client.exec_command(tunnel_command)
-    
-    await asyncio.sleep(8)
-    
-    stdin, stdout, stderr = ssh_client.exec_command("cat ~/tunnel2.log")
-    log_content = stdout.read().decode('utf-8')
-    
-    url_match = re.search(r'your url is: (https://[^\s]+)', log_content)
-    if url_match:
-        tunnel_url = url_match.group(1)
-        logger.info(f"Tunnel URL (without subdomain): {tunnel_url}")
-        return tunnel_url
+    # Wait for tunnel to start and get URL
+    max_retries = 3
+    for attempt in range(max_retries):
+        await asyncio.sleep(5)  # Give tunnel time to start
         
-    # Last resort: direct IP
-    logger.warning("Failed to extract tunnel URL from log, using direct IP address as fallback")
-    stdin, stdout, stderr = ssh_client.exec_command("curl -s ifconfig.me || curl -s icanhazip.com || hostname -I | awk '{print $1}'")
-    public_ip = stdout.read().decode('utf-8').strip()
-    if public_ip:
-        logger.info(f"Using direct IP address as fallback: {public_ip}")
-        return f"http://{public_ip}:{host_port}"
+        # Check if process is running
+        stdin, stdout, stderr = ssh_client.exec_command(f"cat {tunnel_pid} && ps -p $(cat {tunnel_pid})")
+        if stdout.channel.recv_exit_status() != 0:
+            logger.warning(f"Tunnel process not running on attempt {attempt + 1}")
+            continue
+        
+        # Check tunnel log for URL
+        stdin, stdout, stderr = ssh_client.exec_command(f"cat {tunnel_log}")
+        log_content = stdout.read().decode('utf-8')
+        
+        url_match = re.search(r'your url is: (https://[^\s]+)', log_content)
+        if url_match:
+            tunnel_url = url_match.group(1)
+            logger.info(f"Tunnel URL for deployment {deployment_id}: {tunnel_url}")
+            
+            # Verify tunnel is responding
+            check_cmd = f"curl -s -o /dev/null -w '%{{http_code}}' {tunnel_url}"
+            stdin, stdout, stderr = ssh_client.exec_command(check_cmd)
+            status_code = stdout.read().decode('utf-8').strip()
+            
+            if status_code.startswith('2') or status_code.startswith('3'):
+                return tunnel_url
+            else:
+                logger.warning(f"Tunnel URL returned status {status_code}")
+        
+        if attempt < max_retries - 1:
+            # Kill existing tunnel and retry
+            ssh_client.exec_command(f"pkill -f 'lt --port {host_port}' || true")
+            await asyncio.sleep(2)
     
-    logger.error("All tunnel creation attempts failed")
+    logger.error(f"Failed to establish tunnel for deployment {deployment_id} after {max_retries} attempts")
     return None

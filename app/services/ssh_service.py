@@ -1,7 +1,8 @@
-import paramiko
 import asyncio
 import logging
 from typing import Optional
+
+import paramiko
 
 logger = logging.getLogger("ssh-service")
 
@@ -13,17 +14,21 @@ def connect_ssh(hostname: str, username: str, port: int = 22,
     connect_kwargs = {
         'hostname': hostname,
         'username': username,
-        'port': port
+        'port': port,
+        'password': password,
+        'allow_agent': False,    # Force password authentication
+        'look_for_keys': False   # Prevent using SSH keys
     }
     
-    if password:
-        connect_kwargs['password'] = password
-    elif key_filename:
+    # If a key filename is provided, remove the password and update connect_kwargs
+    if key_filename:
+        del connect_kwargs['password']
         connect_kwargs['key_filename'] = key_filename
-    
+
     logger.info(f"Connecting to {hostname}...")
     ssh_client.connect(**connect_kwargs)
     return ssh_client
+
 
 async def ensure_dependencies(ssh_client, password: Optional[str] = None):
     sudo_prefix = f"echo '{password}' | sudo -S " if password else "sudo "

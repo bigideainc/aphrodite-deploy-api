@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 from datetime import datetime
 
@@ -20,13 +21,23 @@ async def deploy_model(deployment_id: str, request: DeploymentRequest):
     Background task to deploy the model with proper error handling and state management
     """
     start_time = datetime.now()
+    
+    # Generate a unique port for this deployment
+    hash_object = hashlib.md5(deployment_id.encode())
+    hash_int = int(hash_object.hexdigest(), 16)
+    unique_port = 2242 + (hash_int % 60000)  # Range: 2242-62242 (avoiding system reserved ports)
+    
+    # Use the configured host port from request if available, otherwise use the unique port
+    host_port = request.host_port or unique_port
+    
     try:
-        logger.info(f"Starting deployment {deployment_id} for model {request.model_id}")
+        logger.info(f"Starting deployment {deployment_id} for model {request.model_id} on port {host_port}")
         
         # Update status to in-progress
         if db:
             db.collection('deployments').document(deployment_id).update({
-                'status': 'deploying'
+                'status': 'deploying',
+                'hostPort': host_port  # Store the port in the deployment document
             })
         
         # Connect to SSH
@@ -54,13 +65,14 @@ async def deploy_model(deployment_id: str, request: DeploymentRequest):
             # Ensure dependencies (Node.js, localtunnel)
             await ensure_dependencies(ssh_client, request.ssh_config.password)
             
-            # Setup container
+            # Setup container with deployment_id for unique naming
             container_id = await setup_container(
                 ssh_client=ssh_client,
                 model_id=request.model_id,
                 user_id=request.user_id,
-                host_port=request.host_port,
-                huggingface_token=request.huggingface_token
+                host_port=host_port,
+                huggingface_token=request.huggingface_token,
+                deployment_id=deployment_id  # Pass deployment_id for unique container naming
             )
             
             # Update deployment with container ID
@@ -74,7 +86,7 @@ async def deploy_model(deployment_id: str, request: DeploymentRequest):
             endpoints = await monitor_container_startup(
                 ssh_client, 
                 container_id, 
-                request.host_port
+                host_port
             )
             
             # Verify localtunnel installation
@@ -85,10 +97,10 @@ async def deploy_model(deployment_id: str, request: DeploymentRequest):
             
             # Setup tunnel with improved error handling
             safe_api_name = request.api_name.lower().replace(" ", "-")
-            subdomain = f"{safe_api_name}-{request.user_id}"
+            subdomain = f"{safe_api_name}-{deployment_id[:8]}"  # Using part of deployment_id for uniqueness
             tunnel_url = await setup_tunnel(
                 ssh_client, 
-                request.host_port, 
+                host_port, 
                 subdomain, 
                 request.ssh_config.password
             )
@@ -124,7 +136,7 @@ async def deploy_model(deployment_id: str, request: DeploymentRequest):
                 'apiName': request.api_name,
                 'containerId': container_id,
                 'machineId': machine_id,
-                'containerPort': request.host_port,
+                'containerPort': host_port,  # Now using the unique host port
                 'tunnelUrl': tunnel_url,
                 'localEndpoints': endpoints,
                 'endpoints': mapped_endpoints,
@@ -147,7 +159,7 @@ async def deploy_model(deployment_id: str, request: DeploymentRequest):
                 deployment_data['containerDetails'] = {
                     'id': container_id,
                     'model': request.model_id,
-                    'hostPort': request.host_port,
+                    'hostPort': host_port,  # Using the unique host port
                     'containerPort': 2242
                 }
                 
@@ -159,7 +171,7 @@ async def deploy_model(deployment_id: str, request: DeploymentRequest):
                 db.collection('deployments').document(deployment_id).update(deployment_data)
                 logger.info(f"Updated deployment {deployment_id} with complete details including tunnel URL: {tunnel_url}")
             
-            logger.info(f"Deployment {deployment_id} completed successfully")
+            logger.info(f"Deployment {deployment_id} completed successfully on port {host_port}")
             
         except Exception as e:
             error_msg = f"Deployment failed: {str(e)}"
