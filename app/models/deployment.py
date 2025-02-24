@@ -1,3 +1,4 @@
+
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -26,7 +27,7 @@ class ContainerDetails(BaseModel):
     containerPort: int = 2242
     image: Optional[str] = None
     container_name: Optional[str] = None
-    deployment_id: Optional[str] = None  # Added to link container to deployment
+    deployment_id: Optional[str] = None
 
 class DeploymentStatus(BaseModel):
     deployment_id: str
@@ -37,7 +38,7 @@ class DeploymentStatus(BaseModel):
     updated_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
-    host_port: Optional[int] = None  # Added to track the port used
+    host_port: Optional[int] = None
     
 class DeploymentResponse(BaseModel):
     deployment_id: str
@@ -48,7 +49,7 @@ class DeploymentResponse(BaseModel):
     endpoints: Optional[Dict[str, str]] = None
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
     monitor_url: Optional[str] = None
-    host_port: Optional[int] = None  # Added to return the port used
+    host_port: Optional[int] = None
 
 class DeploymentListResponse(BaseModel):
     deployments: List[DeploymentResponse]
@@ -82,4 +83,5 @@ class DeploymentDetail(BaseModel):
     metrics: Optional[DeploymentMetrics] = None
     error: Optional[str] = None
     host_port: Optional[int] = None  # Added to display the port used    error: Optional[str] = None
-    host_port: Optional[int] = None  # Added to display the port used
+    host_port: Optional[int] = None
+    error: Optional[str] = None

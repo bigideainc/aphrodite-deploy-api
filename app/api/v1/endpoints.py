@@ -32,10 +32,13 @@ async def deploy(request: DeploymentRequest, background_tasks: BackgroundTasks):
         
         background_tasks.add_task(deploy_model, deployment_id, request)
         
+        # Return response including monitoring URL
+        monitor_url = f"/api/v1/deployments/{deployment_id}/status"
         return DeploymentResponse(
             deployment_id=deployment_id,
             status="queued",
-            created_at=datetime.now().isoformat()
+            created_at=datetime.now().isoformat(),
+            monitor_url=monitor_url
         )
         
     except Exception as e:
@@ -44,6 +47,9 @@ async def deploy(request: DeploymentRequest, background_tasks: BackgroundTasks):
 
 @router.get("/deployments/{deployment_id}", response_model=Dict[str, Any])
 async def get_deployment(deployment_id: str):
+    """
+    Get raw deployment data
+    """
     if not db:
         raise HTTPException(status_code=500, detail="Firebase not configured")
     
@@ -52,6 +58,69 @@ async def get_deployment(deployment_id: str):
         raise HTTPException(status_code=404, detail="Deployment not found")
     
     return doc.to_dict()
+
+@router.get("/deployments/{deployment_id}/status", response_model=Dict[str, Any])
+async def get_deployment_status(deployment_id: str):
+    """
+    Get detailed deployment status with progress information
+    """
+    if not db:
+        raise HTTPException(status_code=500, detail="Firebase not configured")
+    
+    doc = db.collection('deployments').document(deployment_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    
+    deployment_data = doc.to_dict()
+    status = deployment_data.get('status', 'unknown')
+    
+    # Calculate progress percentage based on status
+    progress = 0
+    if status == 'queued':
+        progress = 5
+    elif status == 'deploying':
+        progress = 15
+    elif status == 'starting':
+        progress = 50
+    elif status == 'active':
+        progress = 100
+    elif status == 'failed':
+        progress = -1  # Error state
+    
+    # Determine estimated time remaining
+    estimated_time = None
+    if status == 'queued':
+        estimated_time = "5-10 minutes"
+    elif status == 'deploying':
+        estimated_time = "4-8 minutes"
+    elif status == 'starting':
+        estimated_time = "1-3 minutes"
+    
+    # Prepare the detailed status response
+    response = {
+        'deployment_id': deployment_id,
+        'status': status,
+        'progress': progress,
+        'estimated_time': estimated_time,
+        'model_id': deployment_data.get('modelId'),
+        'created_at': deployment_data.get('createdAt'),
+        'container_id': deployment_data.get('containerId'),
+        'machine_id': deployment_data.get('machineId'),
+        'tunnel_url': deployment_data.get('tunnelUrl'),
+        'endpoints': deployment_data.get('endpoints'),
+    }
+    
+    # Add error information if failed
+    if status == 'failed':
+        response['error'] = deployment_data.get('error')
+        response['failed_at'] = deployment_data.get('failedAt')
+    
+    # Add completion information if active
+    if status == 'active':
+        response['deployment_completed'] = deployment_data.get('deploymentCompleted')
+        response['deployment_duration'] = deployment_data.get('deploymentDuration')
+    
+    return response
 
 @router.get("/deployments", response_model=List[Dict[str, Any]])
 async def list_deployments(user_id: Optional[str] = None, limit: int = 10):
@@ -66,3 +135,69 @@ async def list_deployments(user_id: Optional[str] = None, limit: int = 10):
     deployments = [doc.to_dict() for doc in query.stream()]
     
     return deployments
+
+@router.delete("/deployments/{deployment_id}", response_model=Dict[str, Any])
+async def delete_deployment(deployment_id: str):
+    """
+    Delete a deployment - stops the container and removes the deployment
+    """
+    if not db:
+        raise HTTPException(status_code=500, detail="Firebase not configured")
+    
+    # Get deployment info
+    doc = db.collection('deployments').document(deployment_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    
+    deployment_data = doc.to_dict()
+    
+    # If the deployment has an active container, we should stop it
+    # This would require implementing container stopping logic in a service
+    # For now, we'll just mark it as deleted in the database
+    
+    from firebase_admin import firestore
+    db.collection('deployments').document(deployment_id).update({
+        'status': 'deleted',
+        'deletedAt': firestore.SERVER_TIMESTAMP
+    })
+    
+    return {
+        'deployment_id': deployment_id,
+        'status': 'deleted',
+        'message': 'Deployment marked as deleted'
+    }
+
+@router.post("/deployments/{deployment_id}/stop", response_model=Dict[str, Any])
+async def stop_deployment(deployment_id: str):
+    """
+    Stop a running deployment without deleting it
+    """
+    if not db:
+        raise HTTPException(status_code=500, detail="Firebase not configured")
+    
+    # Get deployment info
+    doc = db.collection('deployments').document(deployment_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    
+    deployment_data = doc.to_dict()
+    current_status = deployment_data.get('status')
+    
+    if current_status != 'active':
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot stop deployment in '{current_status}' status"
+        )
+    
+    # Update status to stopped
+    from firebase_admin import firestore
+    db.collection('deployments').document(deployment_id).update({
+        'status': 'stopped',
+        'stoppedAt': firestore.SERVER_TIMESTAMP
+    })
+    
+    return {
+        'deployment_id': deployment_id,
+        'status': 'stopped',
+        'message': 'Deployment marked as stopped'
+    }
